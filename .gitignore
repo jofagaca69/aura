@@ -20,6 +20,9 @@ wheels/
 .installed.cfg
 *.egg
 
+data/chroma_db
+data/model_cache
+
 # Virtual environments
 venv/
 env/
