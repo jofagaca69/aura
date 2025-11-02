@@ -171,7 +171,7 @@ with tab_env:
         with col1:
             model_name = st.selectbox(
                 "MODEL_NAME",
-                options=["gemini-2.0-flash-exp", "gemini-1.5-pro", "gemini-1.5-flash"],
+                options=["gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-2.5-flash"],
                 index=0,
                 help="Modelo de Google Gemini a utilizar"
             )
@@ -357,7 +357,7 @@ with tab_env:
     GOOGLE_API_KEY=your_google_api_key_here
     
     # Configuración del Modelo
-    MODEL_NAME=gemini-2.0-flash-exp
+    MODEL_NAME=gemini-2.5-flash-lite
     TEMPERATURE=0.3
     
     # Configuración rag
@@ -409,7 +409,7 @@ with tab_env:
             st.markdown("**⚙️ Variables del Sistema:**")
 
             optional_vars = {
-                "MODEL_NAME": ("gemini-2.0-flash-exp", "Modelo de IA"),
+                "MODEL_NAME": ("gemini-2.5-flash-lite", "Modelo de IA"),
                 "TEMPERATURE": ("0.3", "Temperatura del modelo"),
                 "CHUNK_SIZE": ("800", "Tamaño de fragmentos"),
                 "CHUNK_OVERLAP": ("150", "Solapamiento de fragmentos"),

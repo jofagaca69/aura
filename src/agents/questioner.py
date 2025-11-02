@@ -1,19 +1,36 @@
 """
 Agente preguntador interactivo para recopilar información del usuario
+Utiliza Gemini (Google LLM) para generar preguntas contextuales e inteligentes
 """
 from typing import Dict, Any, List, Optional
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
+import json
 
 from src.agents.base_agent import BaseAgent
 
 
+class ExtractedInfo(BaseModel):
+    """Información extraída de las respuestas del usuario"""
+    categoria_producto: Optional[str] = Field(default=None, description="Tipo de producto buscado")
+    presupuesto_min: Optional[float] = Field(default=None, description="Presupuesto mínimo")
+    presupuesto_max: Optional[float] = Field(default=None, description="Presupuesto máximo")
+    uso_principal: Optional[str] = Field(default=None, description="Uso principal del producto")
+    caracteristicas_clave: List[str] = Field(default_factory=list, description="Características importantes")
+    preferencias_marca: List[str] = Field(default_factory=list, description="Marcas preferidas")
+    restricciones: List[str] = Field(default_factory=list, description="Limitaciones o restricciones")
+    nivel_urgencia: Optional[str] = Field(default=None, description="Qué tan urgente es la compra")
+    contexto_adicional: Optional[str] = Field(default=None, description="Información adicional relevante")
+
+
 class ConversationContext(BaseModel):
-    """Contexto de la conversación"""
+    """Contexto enriquecido de la conversación"""
     questions_asked: List[str] = Field(default_factory=list, description="Preguntas ya realizadas")
     user_answers: List[str] = Field(default_factory=list, description="Respuestas del usuario")
     topics_covered: List[str] = Field(default_factory=list, description="Temas ya cubiertos")
     current_question_number: int = Field(default=0, description="Número de pregunta actual")
+    extracted_info: ExtractedInfo = Field(default_factory=ExtractedInfo, description="Información extraída")
+    information_score: Dict[str, float] = Field(default_factory=dict, description="Score de información recopilada")
 
 
 class QuestionerAgent(BaseAgent):
@@ -38,70 +55,101 @@ class QuestionerAgent(BaseAgent):
         
         self.conversation_context = ConversationContext()
         
+        # Prompt para extracción inteligente de información usando Gemini
+        self.extraction_prompt = ChatPromptTemplate.from_messages([
+            ("system", """Eres un experto analizador de conversaciones de ventas. Tu tarea es extraer 
+            información estructurada de las respuestas del usuario.
+            
+            📋 INFORMACIÓN A EXTRAER:
+            1. **categoria_producto**: Tipo de producto (laptop, teléfono, tablet, etc.) - STRING o null
+            2. **presupuesto_min**: Presupuesto mínimo en números - FLOAT o null
+            3. **presupuesto_max**: Presupuesto máximo en números - FLOAT o null
+            4. **uso_principal**: Uso principal del producto - STRING o null
+            5. **caracteristicas_clave**: Lista de características importantes - LIST[STRING]
+            6. **preferencias_marca**: Marcas mencionadas o preferidas - LIST[STRING]
+            7. **restricciones**: Limitaciones o restricciones - LIST[STRING]
+            8. **nivel_urgencia**: ¿Qué tan urgente? (inmediato/pronto/sin_prisa) - STRING o null
+            9. **contexto_adicional**: Cualquier otra información relevante - STRING o null
+            
+            🎯 INSTRUCCIONES:
+            - Extrae SOLO información EXPLÍCITA o CLARAMENTE IMPLÍCITA
+            - Si no hay información sobre un campo, usa null o lista vacía []
+            - Para presupuestos, convierte texto a números (ej: "mil euros" → 1000.0)
+            - Sé conservador: mejor null que información incorrecta
+            
+            📝 INFORMACIÓN YA RECOPILADA:
+            {previous_info}
+            
+            💬 ÚLTIMA RESPUESTA DEL USUARIO:
+            "{user_response}"
+            
+            🎯 RESPONDE EN FORMATO JSON VÁLIDO (sin markdown, sin comentarios):
+            {{
+                "categoria_producto": "valor o null",
+                "presupuesto_min": número o null,
+                "presupuesto_max": número o null,
+                "uso_principal": "valor o null",
+                "caracteristicas_clave": ["lista", "de", "características"],
+                "preferencias_marca": ["lista", "de", "marcas"],
+                "restricciones": ["lista", "de", "restricciones"],
+                "nivel_urgencia": "valor o null",
+                "contexto_adicional": "valor o null"
+            }}"""),
+            ("user", "Extrae la información de esta respuesta:")
+        ])
+        
         # Prompt mejorado para generar preguntas ultra-personalizadas con Gemini
         self.question_prompt = ChatPromptTemplate.from_messages([
             ("system", """Eres un asistente de compras experto y empático que hace preguntas INTELIGENTES 
             y PERSONALIZADAS para entender las necesidades del usuario. Tu objetivo es descubrir qué 
             producto necesita realmente y por qué.
             
-            🎯 ESTRATEGIA DE PREGUNTAS:
+            🎯 ESTRATEGIA AVANZADA DE PREGUNTAS:
             
-            1. **ANALIZA EL CONTEXTO**: Lee cuidadosamente las respuestas previas
-            2. **PROFUNDIZA**: Si el usuario mencionó algo interesante, pregunta más detalles
-            3. **CONECTA IDEAS**: Relaciona la nueva pregunta con lo que ya sabes
-            4. **SÉ ESPECÍFICO**: Usa la información que ya tienes para hacer preguntas más precisas
-            5. **PRIORIZA**: Enfócate en lo que aún falta y es crítico
+            1. **ANALIZA LA INFORMACIÓN EXTRAÍDA**: Revisa qué datos ya tienes
+            2. **IDENTIFICA VACÍOS CRÍTICOS**: ¿Qué información esencial falta?
+            3. **PRIORIZA INTELIGENTEMENTE**: Pregunta primero lo más importante
+            4. **CONECTA Y PROFUNDIZA**: Usa lo que sabes para preguntas más específicas
+            5. **SÉ NATURAL**: Haz que la conversación fluya orgánicamente
             
-            📊 INFORMACIÓN CRÍTICA A OBTENER:
-            - **Categoría**: ¿Qué tipo de producto? (laptop, teléfono, etc.)
-            - **Presupuesto**: ¿Rango de precio aproximado?
-            - **Uso principal**: ¿Para qué lo usará? (trabajo, gaming, estudio, etc.)
-            - **Características clave**: ¿Qué especificaciones son importantes?
-            - **Preferencias**: ¿Marcas, tamaños, colores, etc.?
-            - **Restricciones**: ¿Limitaciones de tiempo, espacio, compatibilidad?
+            📊 INFORMACIÓN YA RECOPILADA:
+            {extracted_info_summary}
+            
+            🎯 INFORMACIÓN QUE AÚN FALTA:
+            {missing_info}
+            
+            📝 CONVERSACIÓN COMPLETA:
+            {conversation_history}
             
             💡 EJEMPLOS DE PREGUNTAS CONTEXTUALES:
             
-            Ejemplo 1:
-            Usuario dijo: "Necesito una laptop"
-            Mal: "¿Qué tipo de producto buscas?"
-            Bien: "Perfecto, ¿para qué usarás principalmente tu laptop? ¿Trabajo, estudio, gaming o entretenimiento?"
+            Escenario 1 - Ya sabes: laptop para programación
+            Pregunta inteligente: "Genial, para programación. ¿Trabajas con herramientas pesadas como Docker, 
+            máquinas virtuales o IDEs como Android Studio? Esto nos ayudará a definir cuánta RAM necesitas."
             
-            Ejemplo 2:
-            Usuario dijo: "Para programar"
-            Mal: "¿Qué características quieres?"
-            Bien: "Excelente, para programación. ¿Qué tipo de desarrollo haces? ¿Trabajas con IDEs pesados, 
-            máquinas virtuales o desarrollo web principalmente?"
+            Escenario 2 - Ya sabes: teléfono, presupuesto 500-700€
+            Pregunta inteligente: "Perfecto, con ese presupuesto tienes buenas opciones. ¿Qué es más importante 
+            para ti: la calidad de la cámara, la duración de batería, o el rendimiento para juegos?"
             
-            Ejemplo 3:
-            Usuario dijo: "Desarrollo web y algo de edición de video"
-            Mal: "¿Cuánto quieres gastar?"
-            Bien: "Interesante combinación. Para edición de video necesitarás buena potencia. 
-            ¿Cuál es tu presupuesto aproximado para una máquina que maneje ambas tareas?"
+            Escenario 3 - Ya sabes: tablet, para estudiar y ver series
+            Pregunta inteligente: "Entiendo, para estudiar y entretenimiento. ¿Prefieres algo ligero y portátil 
+            como una tablet de 10 pulgadas, o una pantalla más grande tipo 12 pulgadas aunque pese un poco más?"
             
-            ⚠️ EVITA:
-            - Preguntas genéricas que ignoran el contexto
-            - Repetir información que ya diste
-            - Preguntar lo que ya respondieron implícitamente
-            - Ser robótico o formal en exceso
+            ⚠️ REGLAS CRÍTICAS:
+            1. **NO repitas información** que el usuario ya dio
+            2. **NO preguntes** sobre campos que ya tienes completos
+            3. **USA lo que sabes** para hacer preguntas más específicas
+            4. **UNA pregunta a la vez**, clara y directa
+            5. **SÉ conversacional**, no robótico
             
-            ✅ REGLAS DE ORO:
-            1. **USA lo que ya sabes**: Menciona detalles previos en tu pregunta
-            2. **Una idea por pregunta**: No hagas preguntas compuestas
-            3. **Conversacional**: Como si hablaras con un amigo
-            4. **Empático**: Muestra que entiendes sus necesidades
-            5. **Solo la pregunta**: No expliques, no des contexto extra
+            🎯 GENERA UNA PREGUNTA que:
+            - Esté basada en el contexto completo
+            - Busque la información más crítica que falta
+            - Sea natural y empática
+            - Ayude a entender mejor las necesidades del usuario
             
-            📝 CONTEXTO ACTUAL:
-            Pregunta número: {questions_count}/{max_questions}
-            Temas ya cubiertos: {topics_covered}
-            
-            CONVERSACIÓN HASTA AHORA:
-            {conversation_history}
-            
-            🎯 INSTRUCCIÓN: Basándote en TODO el contexto anterior, genera UNA pregunta inteligente, 
-            específica y personalizada que profundice en la información más valiosa que aún falte."""),
-            ("user", "Genera la siguiente pregunta personalizada:")
+            Responde SOLO con la pregunta, sin explicaciones adicionales."""),
+            ("user", "Genera la siguiente pregunta contextual:")
         ])
         
         # Prompt mejorado para analizar si necesitamos más información
@@ -110,34 +158,47 @@ class QuestionerAgent(BaseAgent):
             
             🎯 TU TAREA: Determinar si tenemos SUFICIENTE información para recomendar productos.
             
-            📋 INFORMACIÓN MÍNIMA NECESARIA para una buena recomendación:
-            1. **Categoría de producto** (qué tipo de producto busca)
-            2. **Presupuesto** (rango de precio, aunque sea aproximado)
-            3. **Uso principal** O **Características clave** (al menos uno de estos)
+            📊 INFORMACIÓN EXTRAÍDA HASTA AHORA:
+            {extracted_info_summary}
+            
+            📋 CRITERIOS DE EVALUACIÓN:
+            
+            **INFORMACIÓN CRÍTICA** (debe estar presente):
+            - ✓ Categoría de producto (qué busca)
+            - ✓ Presupuesto aproximado (rango de precio)
+            - ✓ Uso principal O características clave
+            
+            **INFORMACIÓN ÚTIL** (deseable pero no esencial):
+            - Preferencias de marca
+            - Restricciones específicas
+            - Urgencia de compra
+            - Contexto adicional
             
             ✅ TENEMOS SUFICIENTE SI:
-            - Sabemos QUÉ busca, CUÁNTO puede gastar, y PARA QUÉ lo necesita
-            - O tenemos suficiente contexto para hacer recomendaciones relevantes
-            - O el usuario fue muy específico y claro en sus respuestas
+            - Categoría + Presupuesto + (Uso O Características) están presentes
+            - La información es lo suficientemente específica para recomendar
+            - Tenemos al menos 2 de los 3 elementos críticos con buen detalle
             
             ⚠️ NECESITAMOS MÁS SI:
-            - Falta información crítica (categoría, presupuesto o uso)
-            - Las respuestas fueron muy vagas o generales
-            - Hay contradicciones que necesitan clarificación
-            - El usuario mencionó algo importante que no hemos profundizado
+            - Falta categoría de producto (crítico)
+            - No sabemos el presupuesto ni aproximado (crítico)
+            - No tenemos idea del uso ni características deseadas
+            - La información es muy vaga o ambigua
             
-            📊 CONTEXTO DE LA CONVERSACIÓN:
+            🎯 ANÁLISIS ACTUAL:
+            Preguntas realizadas: {questions_count}/{max_questions}
+            Score de información: {information_score}%
+            
+            📝 CONVERSACIÓN:
             {conversation_history}
             
-            Preguntas realizadas: {questions_count}/{max_questions}
+            🎯 DECISIÓN:
+            Responde SOLO con una palabra seguida de breve explicación:
+            - "CONTINUAR: [razón]" - Si falta información crítica
+            - "SUFICIENTE: [razón]" - Si podemos hacer buenas recomendaciones
             
-            🎯 DECISIÓN REQUERIDA:
-            Responde SOLO con una de estas dos palabras seguida de una breve explicación:
-            - "CONTINUAR: [razón breve]" - Si necesitas información crítica adicional
-            - "SUFICIENTE: [razón breve]" - Si ya puedes hacer buenas recomendaciones
-            
-            Sé crítico pero también eficiente. No necesitamos información perfecta, solo suficiente."""),
-            ("user", "¿Tenemos suficiente información o debemos continuar preguntando?")
+            Sé eficiente: mejor suficiente información que perfecta."""),
+            ("user", "¿Debemos continuar preguntando o ya tenemos suficiente?")
         ])
         
         # Prompt para generar la primera pregunta (también personalizada)
@@ -201,26 +262,31 @@ class QuestionerAgent(BaseAgent):
             if not should_continue:
                 return None
         
-        # Generar conversación histórica con contexto rico
+        # Generar contexto enriquecido para Gemini
         conversation_history = self._format_conversation_history()
+        extracted_info_summary = self._format_extracted_info()
+        missing_info = self._identify_missing_info()
         
-        # Generar siguiente pregunta personalizada con Gemini
+        # Generar siguiente pregunta personalizada con Gemini usando contexto completo
         try:
             chain = self.question_prompt | self.llm
             result = chain.invoke({
-                "questions_count": self.conversation_context.current_question_number,
-                "max_questions": self.MAX_QUESTIONS,
-                "conversation_history": conversation_history,
-                "topics_covered": ", ".join(self.conversation_context.topics_covered) if self.conversation_context.topics_covered else "Ninguno aún"
+                "extracted_info_summary": extracted_info_summary,
+                "missing_info": missing_info,
+                "conversation_history": conversation_history
             })
             
             question = result.content.strip()
             
-            # Limpiar la pregunta (remover comillas extras si las hay)
-            question = question.strip('"').strip("'")
+            # Limpiar la pregunta (remover comillas extras, markdown, etc.)
+            question = question.strip('"').strip("'").strip('`')
+            if question.startswith("Pregunta:"):
+                question = question.replace("Pregunta:", "").strip()
             
             self.conversation_context.current_question_number += 1
             self.conversation_context.questions_asked.append(question)
+            
+            print(f"✅ Pregunta {self.conversation_context.current_question_number} generada")
             
             return question
             
@@ -230,23 +296,25 @@ class QuestionerAgent(BaseAgent):
     
     def add_user_response(self, response: str):
         """
-        Añade una respuesta del usuario al contexto y extrae información clave
+        Añade una respuesta del usuario al contexto y extrae información clave usando Gemini
         
         Args:
             response: Respuesta del usuario
         """
         self.conversation_context.user_answers.append(response)
         
-        # Extraer temas mencionados (método simple)
+        # Extraer información estructurada usando Gemini
+        self._extract_information_with_llm(response)
+        
+        # Extraer temas mencionados (método complementario rápido)
         self._extract_topics(response)
         
-        # Análisis más profundo con Gemini (solo después de la segunda respuesta)
-        if len(self.conversation_context.user_answers) >= 2:
-            self._analyze_user_intent(response)
+        # Calcular score de información recopilada
+        self._calculate_information_score()
     
     def _should_continue_asking(self) -> bool:
         """
-        Determina si debemos continuar haciendo preguntas
+        Determina si debemos continuar haciendo preguntas usando análisis inteligente con Gemini
         
         Returns:
             True si debemos continuar, False si tenemos suficiente información
@@ -254,12 +322,17 @@ class QuestionerAgent(BaseAgent):
         if self.conversation_context.current_question_number >= self.MAX_QUESTIONS:
             return False
         
+        # Obtener contexto enriquecido
         conversation_history = self._format_conversation_history()
+        extracted_info_summary = self._format_extracted_info()
+        info_score = self._calculate_information_score()
         
         try:
             chain = self.analysis_prompt | self.llm
             result = chain.invoke({
                 "conversation_history": conversation_history,
+                "extracted_info_summary": extracted_info_summary,
+                "information_score": info_score,
                 "questions_count": self.conversation_context.current_question_number,
                 "max_questions": self.MAX_QUESTIONS
             })
@@ -267,12 +340,18 @@ class QuestionerAgent(BaseAgent):
             analysis = result.content.strip()
             
             # Si el análisis indica CONTINUAR, seguimos
-            return "CONTINUAR" in analysis.upper()
+            should_continue = "CONTINUAR" in analysis.upper()
+            
+            # Log del análisis para debugging
+            print(f"📊 Análisis LLM: {analysis[:100]}...")
+            print(f"🎯 Decisión: {'Continuar' if should_continue else 'Suficiente información'}")
+            
+            return should_continue
             
         except Exception as e:
-            print(f"Error analizando contexto: {e}")
-            # En caso de error, continuamos si no hemos alcanzado el límite
-            return self.conversation_context.current_question_number < self.MAX_QUESTIONS
+            print(f"⚠️  Error analizando contexto: {e}")
+            # En caso de error, continuamos solo si el score es bajo
+            return info_score < 60
     
     def _extract_topics(self, response: str):
         """
@@ -297,38 +376,198 @@ class QuestionerAgent(BaseAgent):
                 if topic not in self.conversation_context.topics_covered:
                     self.conversation_context.topics_covered.append(topic)
     
-    def _analyze_user_intent(self, response: str):
+    def _extract_information_with_llm(self, response: str):
         """
-        Analiza la intención y contexto profundo de la respuesta usando Gemini
-        (Método opcional para mejorar la comprensión del contexto)
+        Extrae información estructurada de la respuesta del usuario usando Gemini
         
         Args:
-            response: Última respuesta del usuario
+            response: Respuesta del usuario
         """
         try:
-            # Prompt para análisis rápido de intención
-            intent_prompt = ChatPromptTemplate.from_messages([
-                ("system", """Analiza BREVEMENTE la siguiente respuesta del usuario y extrae:
-                1. Tema principal mencionado (una palabra: presupuesto/categoría/uso/características/marca)
-                2. Nivel de especificidad (bajo/medio/alto)
-                3. Si menciona restricciones o preferencias fuertes
+            # Formatear información previa
+            previous_info = self._format_extracted_info()
+            
+            # Usar Gemini para extraer información estructurada
+            chain = self.extraction_prompt | self.llm
+            result = chain.invoke({
+                "user_response": response,
+                "previous_info": previous_info
+            })
+            
+            # Parsear respuesta JSON
+            extracted_text = result.content.strip()
+            
+            # Limpiar markdown si está presente
+            if "```json" in extracted_text:
+                extracted_text = extracted_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in extracted_text:
+                extracted_text = extracted_text.split("```")[1].split("```")[0].strip()
+            
+            extracted_data = json.loads(extracted_text)
+            
+            # Actualizar información extraída (merge con info previa)
+            info = self.conversation_context.extracted_info
+            
+            # Actualizar solo campos no nulos
+            if extracted_data.get("categoria_producto"):
+                info.categoria_producto = extracted_data["categoria_producto"]
+            
+            if extracted_data.get("presupuesto_min") is not None:
+                info.presupuesto_min = float(extracted_data["presupuesto_min"])
                 
-                Responde en formato: TEMA|ESPECIFICIDAD|RESTRICCIONES_SI_O_NO
-                Ejemplo: "categoria|alto|si" o "presupuesto|medio|no"
-                """),
-                ("user", f"Respuesta: {response}")
-            ])
+            if extracted_data.get("presupuesto_max") is not None:
+                info.presupuesto_max = float(extracted_data["presupuesto_max"])
             
-            chain = intent_prompt | self.llm
-            result = chain.invoke({})
-            analysis = result.content.strip().lower()
+            if extracted_data.get("uso_principal"):
+                info.uso_principal = extracted_data["uso_principal"]
             
-            # Guardar análisis en memoria para uso futuro
-            self.update_memory(f"intent_analysis_{len(self.conversation_context.user_answers)}", analysis)
+            if extracted_data.get("nivel_urgencia"):
+                info.nivel_urgencia = extracted_data["nivel_urgencia"]
             
+            if extracted_data.get("contexto_adicional"):
+                # Combinar con contexto previo si existe
+                if info.contexto_adicional:
+                    info.contexto_adicional += f" | {extracted_data['contexto_adicional']}"
+                else:
+                    info.contexto_adicional = extracted_data["contexto_adicional"]
+            
+            # Para listas, hacer merge (no duplicar)
+            for caracteristica in extracted_data.get("caracteristicas_clave", []):
+                if caracteristica and caracteristica not in info.caracteristicas_clave:
+                    info.caracteristicas_clave.append(caracteristica)
+            
+            for marca in extracted_data.get("preferencias_marca", []):
+                if marca and marca not in info.preferencias_marca:
+                    info.preferencias_marca.append(marca)
+            
+            for restriccion in extracted_data.get("restricciones", []):
+                if restriccion and restriccion not in info.restricciones:
+                    info.restricciones.append(restriccion)
+            
+            print(f"✅ Información extraída: {len(extracted_data)} campos procesados")
+            
+        except json.JSONDecodeError as e:
+            print(f"⚠️  Error parseando JSON de extracción: {e}")
+            print(f"Respuesta recibida: {extracted_text[:200]}")
         except Exception as e:
-            # Si falla el análisis, continuar sin problema
-            pass
+            print(f"⚠️  Error extrayendo información con LLM: {e}")
+    
+    def _calculate_information_score(self) -> float:
+        """
+        Calcula un score (0-100) de cuánta información crítica hemos recopilado
+        
+        Returns:
+            Score de 0 a 100
+        """
+        info = self.conversation_context.extracted_info
+        score = 0.0
+        
+        # Información crítica (70% del score)
+        if info.categoria_producto:
+            score += 25
+        
+        if info.presupuesto_min or info.presupuesto_max:
+            score += 25
+        
+        if info.uso_principal or len(info.caracteristicas_clave) > 0:
+            score += 20
+        
+        # Información adicional útil (30% del score)
+        if len(info.caracteristicas_clave) >= 2:
+            score += 10
+        
+        if len(info.preferencias_marca) > 0:
+            score += 5
+        
+        if len(info.restricciones) > 0:
+            score += 5
+        
+        if info.nivel_urgencia:
+            score += 5
+        
+        if info.contexto_adicional:
+            score += 5
+        
+        self.conversation_context.information_score["total"] = score
+        return score
+    
+    def _format_extracted_info(self) -> str:
+        """
+        Formatea la información extraída en un texto legible
+        
+        Returns:
+            String formateado con la información extraída
+        """
+        info = self.conversation_context.extracted_info
+        
+        lines = []
+        lines.append("📋 INFORMACIÓN EXTRAÍDA:")
+        lines.append("")
+        
+        lines.append(f"🏷️  Categoría: {info.categoria_producto or '❌ No especificada'}")
+        
+        if info.presupuesto_min or info.presupuesto_max:
+            presupuesto_str = ""
+            if info.presupuesto_min and info.presupuesto_max:
+                presupuesto_str = f"{info.presupuesto_min} - {info.presupuesto_max}€"
+            elif info.presupuesto_min:
+                presupuesto_str = f"Desde {info.presupuesto_min}€"
+            elif info.presupuesto_max:
+                presupuesto_str = f"Hasta {info.presupuesto_max}€"
+            lines.append(f"💰 Presupuesto: {presupuesto_str}")
+        else:
+            lines.append("💰 Presupuesto: ❌ No especificado")
+        
+        lines.append(f"🎯 Uso principal: {info.uso_principal or '❌ No especificado'}")
+        
+        if info.caracteristicas_clave:
+            lines.append(f"⚙️  Características: {', '.join(info.caracteristicas_clave)}")
+        else:
+            lines.append("⚙️  Características: ❌ No especificadas")
+        
+        if info.preferencias_marca:
+            lines.append(f"🏢 Marcas: {', '.join(info.preferencias_marca)}")
+        
+        if info.restricciones:
+            lines.append(f"⚠️  Restricciones: {', '.join(info.restricciones)}")
+        
+        if info.nivel_urgencia:
+            lines.append(f"⏰ Urgencia: {info.nivel_urgencia}")
+        
+        if info.contexto_adicional:
+            lines.append(f"📝 Contexto: {info.contexto_adicional[:100]}...")
+        
+        return "\n".join(lines)
+    
+    def _identify_missing_info(self) -> str:
+        """
+        Identifica qué información crítica aún falta
+        
+        Returns:
+            String describiendo la información faltante
+        """
+        info = self.conversation_context.extracted_info
+        missing = []
+        
+        if not info.categoria_producto:
+            missing.append("❌ Categoría de producto (CRÍTICO)")
+        
+        if not info.presupuesto_min and not info.presupuesto_max:
+            missing.append("❌ Presupuesto aproximado (CRÍTICO)")
+        
+        if not info.uso_principal and len(info.caracteristicas_clave) == 0:
+            missing.append("❌ Uso principal o características clave (CRÍTICO)")
+        
+        if len(info.caracteristicas_clave) < 2:
+            missing.append("⚠️  Características específicas (ÚTIL)")
+        
+        if len(info.preferencias_marca) == 0:
+            missing.append("⚠️  Preferencias de marca (ÚTIL)")
+        
+        if not missing:
+            return "✅ Tenemos toda la información esencial"
+        
+        return "\n".join(missing)
     
     def _format_conversation_history(self) -> str:
         """
@@ -398,11 +637,15 @@ class QuestionerAgent(BaseAgent):
             
             summary = result.content
             
+            # Obtener información extraída
+            extracted_info_dict = self.get_extracted_info()
+            
             # Guardar en memoria
             self.update_memory("conversation_history", conversation_history)
             self.update_memory("analysis", summary)
             self.update_memory("questions_asked", self.conversation_context.questions_asked)
             self.update_memory("user_answers", self.conversation_context.user_answers)
+            self.update_memory("extracted_info", extracted_info_dict)
             
             return {
                 "agent": self.name,
@@ -410,6 +653,8 @@ class QuestionerAgent(BaseAgent):
                 "questions_asked": len(self.conversation_context.questions_asked),
                 "conversation_history": conversation_history,
                 "structured_analysis": summary,
+                "extracted_information": extracted_info_dict,
+                "information_score": self._calculate_information_score(),
                 "topics_covered": self.conversation_context.topics_covered
             }
             
@@ -437,18 +682,49 @@ class QuestionerAgent(BaseAgent):
     
     def get_summary(self) -> str:
         """
-        Obtiene un resumen rápido de la información recopilada hasta ahora
+        Obtiene un resumen enriquecido de la información recopilada hasta ahora
         
         Returns:
-            Resumen de la información
+            Resumen detallado de la información
         """
         if not self.conversation_context.user_answers:
             return "No se ha recopilado información aún."
         
+        score = self._calculate_information_score()
+        info_summary = self._format_extracted_info()
+        
         return f"""
-📊 Información recopilada:
-- Preguntas realizadas: {len(self.conversation_context.questions_asked)}
+📊 RESUMEN DE INFORMACIÓN RECOPILADA
+
+🎯 Score de completitud: {score:.0f}%
+{'🟢' if score >= 70 else '🟡' if score >= 50 else '🔴'} {'Excelente' if score >= 70 else 'Buena' if score >= 50 else 'Necesita más información'}
+
+{info_summary}
+
+📝 Progreso:
+- Preguntas realizadas: {len(self.conversation_context.questions_asked)}/{self.MAX_QUESTIONS}
 - Respuestas obtenidas: {len(self.conversation_context.user_answers)}
 - Temas cubiertos: {', '.join(self.conversation_context.topics_covered) if self.conversation_context.topics_covered else 'Ninguno específico'}
 """
+    
+    def get_extracted_info(self) -> Dict[str, Any]:
+        """
+        Obtiene la información extraída en formato de diccionario
+        
+        Returns:
+            Diccionario con la información extraída
+        """
+        info = self.conversation_context.extracted_info
+        return {
+            "categoria_producto": info.categoria_producto,
+            "presupuesto_min": info.presupuesto_min,
+            "presupuesto_max": info.presupuesto_max,
+            "uso_principal": info.uso_principal,
+            "caracteristicas_clave": info.caracteristicas_clave,
+            "preferencias_marca": info.preferencias_marca,
+            "restricciones": info.restricciones,
+            "nivel_urgencia": info.nivel_urgencia,
+            "contexto_adicional": info.contexto_adicional,
+            "information_score": self._calculate_information_score()
+        }
 

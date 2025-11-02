@@ -44,14 +44,18 @@ class RecommenderAgent(BaseAgent):
             k=10  # Buscamos más productos para tener opciones
         )
         
+        # Limitar a máximo 3 productos para recomendar
+        products_to_recommend = relevant_products[:3]
+        
         # Formatear productos encontrados
-        products_context = self._format_products(relevant_products)
+        products_context = self._format_products(products_to_recommend)
         
         # Generar recomendaciones personalizadas
         recommendations = self._generate_recommendations(
             products_context,
             user_analysis,
-            criteria
+            criteria,
+            num_products=len(products_to_recommend)
         )
         
         # Guardar en memoria
@@ -61,7 +65,7 @@ class RecommenderAgent(BaseAgent):
         return {
             "agent": self.name,
             "recommendations": recommendations,
-            "products_found": len(relevant_products),
+            "products_found": len(products_to_recommend),
             "status": "completed"
         }
     
@@ -88,7 +92,8 @@ class RecommenderAgent(BaseAgent):
         self,
         products_context: str,
         user_analysis: str,
-        criteria: str
+        criteria: str,
+        num_products: int
     ) -> str:
         """
         Genera recomendaciones personalizadas
@@ -97,26 +102,61 @@ class RecommenderAgent(BaseAgent):
             products_context: Productos encontrados
             user_analysis: Análisis del usuario
             criteria: Criterios de búsqueda
+            num_products: Número de productos disponibles para recomendar
             
         Returns:
             Recomendaciones en texto
         """
+        # Ajustar el mensaje según la cantidad de productos disponibles
+        if num_products == 0:
+            return "Lo siento, no encontré productos que coincidan con tus criterios. ¿Podrías darme más detalles o modificar tus preferencias?"
+        
+        products_instruction = f"DEBES recomendar EXACTAMENTE {num_products} producto{'s' if num_products > 1 else ''}, ni uno más ni uno menos."
+        
         prompt = ChatPromptTemplate.from_messages([
             ("system", """Eres un experto asesor de productos con años de experiencia.
             
             Tu tarea es analizar los productos disponibles y las necesidades del usuario,
             y generar recomendaciones personalizadas y detalladas.
             
-            Para cada producto recomendado, incluye:
-            1. Nombre y características principales
-            2. Por qué es adecuado para este usuario específico
-            3. Ventajas y posibles limitaciones
-            4. Relación calidad-precio
+            **FORMATO DE RESPUESTA:**
+            Genera las recomendaciones usando EXACTAMENTE este formato Markdown:
             
-            Ordena las recomendaciones por relevancia (mejor opción primero).
-            Recomienda entre 3 y 5 productos.
+            ### 🥇 Recomendación #1: [Nombre del Producto]
             
-            Sé específico, honesto y útil. Si un producto no es perfecto, menciona las alternativas."""),
+            **🎯 ¿Por qué es perfecto para ti?**
+            [Explicación específica de por qué este producto se ajusta a las necesidades del usuario]
+            
+            **✨ Características principales:**
+            - [Característica 1]
+            - [Característica 2]
+            - [Característica 3]
+            
+            **✅ Ventajas:**
+            - [Ventaja 1]
+            - [Ventaja 2]
+            
+            **⚠️ Consideraciones:**
+            - [Limitación o consideración 1]
+            - [Limitación o consideración 2]
+            
+            **💰 Relación calidad-precio:**  
+            [Tu análisis en 1-2 líneas]
+            
+            ---
+            
+            [Si hay más productos, repite el MISMO formato exacto para las recomendaciones #2 y #3, con el separador --- entre cada una]
+            
+            **REGLAS CRÍTICAS:** 
+            - {products_instruction}
+            - NO inventes productos que no están en la lista
+            - NO generes recomendaciones con "No hay más" o "N/A"
+            - Solo recomienda los productos reales que se te proporcionan
+            - USA SALTOS DE LÍNEA dobles entre cada sección
+            - SEPARA cada recomendación con ---
+            - Ordena por relevancia (mejor primero)
+            - Sé específico pero CONCISO (2-3 líneas por explicación)
+            - Mantén el formato EXACTO mostrado arriba"""),
             ("user", """INFORMACIÓN DEL USUARIO:
 {user_analysis}
 
@@ -126,7 +166,7 @@ CRITERIOS DE BÚSQUEDA:
 PRODUCTOS DISPONIBLES:
 {products_context}
 
-Por favor, genera tus recomendaciones personalizadas:""")
+Por favor, genera tus recomendaciones personalizadas usando ÚNICAMENTE los productos listados arriba y siguiendo el formato Markdown especificado:""")
         ])
         
         chain = prompt | self.llm
@@ -134,7 +174,8 @@ Por favor, genera tus recomendaciones personalizadas:""")
         result = chain.invoke({
             "user_analysis": user_analysis,
             "criteria": criteria,
-            "products_context": products_context
+            "products_context": products_context,
+            "products_instruction": products_instruction
         })
         
         return result.content
