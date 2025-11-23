@@ -251,7 +251,7 @@ class QuestionerEvaluator:
         return summary
 
 
-def load_scenarios(filepath: str = "evaluation/datasets/test_scenarios_pos.json") -> List[Dict[str, Any]]:
+def load_scenarios(filepath: str = "evaluation/datasets/test_one_scenario.json") -> List[Dict[str, Any]]:
     """Carga escenarios de prueba desde archivo JSON"""
     with open(filepath, 'r', encoding='utf-8') as f:
         data = json.load(f)
