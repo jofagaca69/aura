@@ -1,0 +1,33 @@
+{
+  "scenarios": [
+    {
+      "id": "pos_scenario_1",
+      "name": "Usuario básico - AIO para pequeño comercio",
+      "category": "aio",
+      "difficulty": "easy",
+      "conversation": [
+        "Necesito un equipo AIO para mi tienda",
+        "Es para punto de venta básico, facturación y control de inventario",
+        "Que tenga pantalla táctil",
+        "Algo económico pero confiable, no tengo límite de presupuesto",
+        "No tengo preferencia de marca"
+      ],
+      "expected_extraction": {
+        "categoria_producto": "aio",
+        "presupuesto_min": null,
+        "presupuesto_max": null,
+        "sin_limite_presupuesto": true,
+        "uso_principal": "punto de venta, facturación, control de inventario",
+        "caracteristicas_clave": ["pantalla táctil"],
+        "preferencias_marca": []
+      },
+      "expected_outcome": {
+        "should_find_products": true,
+        "min_products": 1,
+        "max_questions": 5,
+        "relevance_keywords": ["aio", "pantalla táctil", "punto de venta", "básico"]
+      }
+    }
+  ]
+}
+
