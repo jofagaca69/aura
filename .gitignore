@@ -25,6 +25,9 @@ data/uploads/**.docx
 data/uploads/**.pdf
 data/uploads/**.json
 data/uploads/**.txt
+data/model_cache
+data/chroma_db
+evaluation/
 
 # Virtual environments
 venv/
