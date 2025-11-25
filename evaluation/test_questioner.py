@@ -2,6 +2,7 @@
 Tests para evaluar el QuestionerAgent
 """
 import json
+import time
 from typing import Dict, Any, List
 from datetime import datetime
 
@@ -144,6 +145,7 @@ class QuestionerEvaluator:
 
         status = "✅ PASS" if test_result['overall_success'] else "❌ FAIL"
         print(f"   {status}")
+        time.sleep(60)
 
         return test_result
 
@@ -187,6 +189,7 @@ class QuestionerEvaluator:
         for scenario in scenarios:
             try:
                 self.test_scenario(scenario)
+                time.sleep(60)
             except Exception as e:
                 print(f"   ❌ Error ejecutando escenario: {e}")
                 self.results.append({
@@ -251,7 +254,7 @@ class QuestionerEvaluator:
         return summary
 
 
-def load_scenarios(filepath: str = "evaluation/datasets/test_one_scenario.json") -> List[Dict[str, Any]]:
+def load_scenarios(filepath: str = "evaluation/datasets/test_multiples_scenarios.json") -> List[Dict[str, Any]]:
     """Carga escenarios de prueba desde archivo JSON"""
     with open(filepath, 'r', encoding='utf-8') as f:
         data = json.load(f)

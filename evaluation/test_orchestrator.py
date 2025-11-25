@@ -373,7 +373,7 @@ class OrchestratorEvaluator:
         return summary
 
 
-def load_scenarios(filepath: str = "evaluation/datasets/test_one_scenario.json") -> List[Dict[str, Any]]:
+def load_scenarios(filepath: str = "evaluation/datasets/test_multiples_scenarios.json") -> List[Dict[str, Any]]:
     """Carga escenarios de prueba"""
     with open(filepath, 'r', encoding='utf-8') as f:
         data = json.load(f)
