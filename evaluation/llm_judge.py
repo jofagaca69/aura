@@ -7,6 +7,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 from evaluation.config import LLM_JUDGE_CONFIG
 from src.config import config
+from src.utils.rate_limiter import RateLimiter
 
 
 class LLMJudge:
@@ -37,6 +38,7 @@ class LLMJudge:
         self.llm = ChatGoogleGenerativeAI(**llm_kwargs)
         self.timeout = timeout
         self.max_retries = LLM_JUDGE_CONFIG.get("max_retries", 3)
+        self.rate_limiter = RateLimiter()
 
         """ 
         Prompt para evaluación de recomendaciones
@@ -113,6 +115,77 @@ class LLMJudge:
             }}
             """),
             ("user", "Evalúa estas recomendaciones:")
+        ])
+
+        """
+        Prompt para evaluación de preguntas del QuestionerAgent
+        """
+        self.question_evaluation_prompt = ChatPromptTemplate.from_messages([
+            ("system", """
+            Eres un evaluador experto de sistemas de preguntas interactivas.
+            Tu tarea es evaluar la calidad de las preguntas generadas por un agente de IA.
+            
+            CRITERIOS DE EVALUACIÓN (escala 0-10):
+            
+            1. **CONTEXTUALIDAD** (0-10):
+               - ¿Las preguntas se adaptan al contexto de respuestas previas?
+               - ¿Evitan repetir información ya obtenida?
+               - ¿Profundizan en áreas relevantes?
+               
+            2. **RELEVANCIA** (0-10):
+               - ¿Las preguntas buscan información crítica para hacer recomendaciones?
+               - ¿Están enfocadas en necesidades del usuario?
+               - ¿Ayudan a entender mejor las preferencias?
+            
+            3. **NATURALIDAD** (0-10):
+               - ¿Las preguntas suenan naturales y conversacionales?
+               - ¿Son fáciles de entender?
+               - ¿Evitan ser robóticas o repetitivas?
+               
+            4. **EFICIENCIA** (0-10):
+               - ¿Las preguntas obtienen información útil?
+               - ¿Evitan preguntas redundantes o innecesarias?
+               - ¿Maximizan el valor de cada pregunta?
+               
+            5. **COMPLETITUD** (0-10):
+               - ¿Las preguntas cubren los aspectos esenciales?
+               - ¿Se obtiene suficiente información para recomendar?
+               - ¿Se identifican necesidades clave?
+               
+            **Historial de conversación:**
+                {conversation_history}
+                
+            **Información extraída:**
+                {extracted_info}
+            
+            INSTRUCCIONES:
+            1. Evalúa cada criterio objetivamente
+            2. Proporciona un score numérico (0-10) para cada uno
+            3. Calcula el score total como promedio de los 5 criterios
+            4. Identifica las mejores preguntas y las que se pueden mejorar
+            5. Proporciona sugerencias concretas
+            
+            SÉ ESTRICTO PERO JUSTO:
+            - Un 10 es excepcional, raramente otorgado
+            - Un 7-8 es bueno/muy bueno
+            - Un 5-6 es aceptable pero mejorable
+            - Menos de 5 indica problemas serios
+            
+            RESPONDE EN FORMATO JSON VÁLIDO (sin markdown, sin comentarios):
+            {{
+                "contextualidad": <número 0-10>,
+                "relevancia": <número 0-10>,
+                "naturalidad": <número 0-10>,
+                "eficiencia": <número 0-10>,
+                "completitud": <número 0-10>,
+                "score_total": <promedio de los 5 scores>,
+                "comentarios": "<feedback específico sobre qué funcionó bien>",
+                "mejores_preguntas": ["pregunta 1", "pregunta 2"],
+                "preguntas_mejorables": ["pregunta que podría mejorarse"],
+                "sugerencias": "<recomendaciones concretas para mejorar>"
+            }}
+            """),
+            ("user", "Evalúa la calidad de las preguntas generadas:")
         ])
 
     def evaluate_recommendations(
@@ -303,16 +376,46 @@ class LLMJudge:
                 if not expected_value:  # Lista vacía esperada
                     scores[field] = 1.0 if not extracted_value else 0.5
                 else:
-                    extracted_set = set(str(v).lower() for v in (extracted_value or []))
-                    expected_set = set(str(v).lower() for v in expected_value)
-
-                    if not expected_set:
-                        scores[field] = 1.0
+                    # Convertir extracted_value a lista si es string (caso especial para categoria_producto)
+                    if isinstance(extracted_value, str):
+                        # Si el valor extraído es un string, compararlo con cada elemento de la lista esperada
+                        extracted_lower = extracted_value.lower()
+                        expected_lower_list = [str(v).lower() for v in expected_value]
+                        
+                        # Verificar si el string extraído contiene o coincide con algún valor esperado
+                        matches = []
+                        for expected_item in expected_lower_list:
+                            # Verificar coincidencia exacta o si el string extraído contiene el valor esperado
+                            if extracted_lower == expected_item or expected_item in extracted_lower or extracted_lower in expected_item:
+                                matches.append(expected_item)
+                        
+                        if matches:
+                            # Si hay coincidencias, calcular score basado en cuántos valores esperados coinciden
+                            scores[field] = len(matches) / len(expected_value)
+                        else:
+                            # Verificar similitud por palabras
+                            extracted_words = set(extracted_lower.split())
+                            all_expected_words = set()
+                            for exp_item in expected_lower_list:
+                                all_expected_words.update(exp_item.split())
+                            
+                            if all_expected_words:
+                                overlap = len(extracted_words & all_expected_words)
+                                scores[field] = overlap / len(all_expected_words) if all_expected_words else 0.0
+                            else:
+                                scores[field] = 0.0
                     else:
-                        # Jaccard similarity
-                        intersection = len(extracted_set & expected_set)
-                        union = len(extracted_set | expected_set)
-                        scores[field] = intersection / union if union > 0 else 0.0
+                        # Si extracted_value ya es una lista, usar el método original
+                        extracted_set = set(str(v).lower() for v in (extracted_value or []))
+                        expected_set = set(str(v).lower() for v in expected_value)
+
+                        if not expected_set:
+                            scores[field] = 1.0
+                        else:
+                            # Jaccard similarity
+                            intersection = len(extracted_set & expected_set)
+                            union = len(extracted_set | expected_set)
+                            scores[field] = intersection / union if union > 0 else 0.0
             elif isinstance(expected_value, bool):
                 # Para booleanos, verificar coincidencia exacta
                 if extracted_value is None:
@@ -324,10 +427,14 @@ class LLMJudge:
                 if extracted_value is None:
                     scores[field] = 0.0
                 else:
-                    diff = abs(extracted_value - expected_value)
-                    # Tolerancia del 10%
-                    tolerance = expected_value * 0.1
-                    scores[field] = 1.0 if diff <= tolerance else max(0, 1 - (diff / expected_value))
+                    try:
+                        extracted_num = float(extracted_value)
+                        diff = abs(extracted_num - expected_value)
+                        # Tolerancia del 10%
+                        tolerance = abs(expected_value) * 0.1 if expected_value != 0 else 0.1
+                        scores[field] = 1.0 if diff <= tolerance else max(0, 1 - (diff / abs(expected_value)) if expected_value != 0 else 0.0)
+                    except (ValueError, TypeError):
+                        scores[field] = 0.0
             else:
                 # Para strings, verificar similitud semántica simple
                 if extracted_value is None:
@@ -336,15 +443,19 @@ class LLMJudge:
                     extracted_lower = str(extracted_value).lower()
                     expected_lower = str(expected_value).lower()
 
-                    # Similitud básica: palabras en común
-                    extracted_words = set(extracted_lower.split())
-                    expected_words = set(expected_lower.split())
-
-                    if not expected_words:
+                    # Si hay coincidencia exacta, score perfecto
+                    if extracted_lower == expected_lower:
                         scores[field] = 1.0
                     else:
-                        overlap = len(extracted_words & expected_words)
-                        scores[field] = overlap / len(expected_words)
+                        # Similitud básica: palabras en común
+                        extracted_words = set(extracted_lower.split())
+                        expected_words = set(expected_lower.split())
+
+                        if not expected_words:
+                            scores[field] = 1.0
+                        else:
+                            overlap = len(extracted_words & expected_words)
+                            scores[field] = overlap / len(expected_words)
 
             total_score += scores[field]
             fields_evaluated += 1
